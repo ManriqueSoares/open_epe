@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+*.log
+scene_teste.html
+_params_test.json
+_preview_test.png
+*.png
+
+*.pdf

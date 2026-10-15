@@ -1,0 +1,6 @@
+flet==1.0.4
+pyvista==0.49.1
+numpy==2.5.4
+ezdxf==1.4.4
+pillow>=10
+matplotlib>=3.8
