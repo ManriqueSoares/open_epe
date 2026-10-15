@@ -6,5 +6,8 @@ scene_teste.html
 _params_test.json
 _preview_test.png
 *.png
-
 *.pdf
+data/source/
+*.dxf
+*.dwg
+*.bak

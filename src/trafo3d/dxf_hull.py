@@ -13,6 +13,9 @@ gera-se a malha por marching cubes + suavização.
 """
 from __future__ import annotations
 
+import json
+import os
+
 import numpy as np
 from PIL import Image, ImageDraw, ImageFilter
 import pyvista as pv
@@ -20,6 +23,20 @@ import pyvista as pv
 from . import dxf_io
 
 S = 0.001  # mm -> m
+
+
+def _tres_aneis(r_in, r_out):
+    """3 enrolamentos concêntricos no intervalo radial [r_in, r_out] (p/ visual)."""
+    if r_out <= r_in:
+        r_out = r_in + 60.0
+    step = (r_out - r_in) / 3.0
+    aneis = []
+    for i in range(3):
+        ri = r_in + i * step
+        re = ri + step * 0.72
+        aneis.append((ri, re))
+    aneis[-1] = (aneis[-1][0], r_out)
+    return aneis
 
 
 # --------------------------------------------------------------- visual hull
@@ -84,9 +101,17 @@ def construir_hull(dxf: str, res: int = 150):
     return mesh
 
 
-def hull_zup(dxf: str, res: int = 150):
-    """Hull no frame do trafo3d (Z-up, base em z=0), em metros."""
-    mesh = construir_hull(dxf, res=res)
+def hull_zup(fonte: str, res: int = 150):
+    """Hull no frame do trafo3d (Z-up, base em z=0), em metros.
+
+    Aceita um .dxf (reconstrói o hull) ou um .json (carrega o .ply pré-gerado).
+    """
+    if fonte.endswith(".json"):
+        with open(fonte, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        ply = os.path.join(os.path.dirname(fonte), d["hull_ply"])
+        return pv.read(ply)
+    mesh = construir_hull(fonte, res=res)
     mesh = mesh.flip_y(inplace=False)                 # desfaz espelhamento vertical
     p = mesh.points
     mesh.points = np.column_stack([p[:, 0], p[:, 2], p[:, 1]])  # (x, z, y) -> Z-up
@@ -136,9 +161,19 @@ def _altura_bobinas(geo, H):
     return y0, y1
 
 
-def info_dxf(dxf: str) -> dict:
-    """Extrai dimensões, base, centros de coluna, anéis e altura das bobinas."""
-    geo = dxf_io.ler_dxf(dxf)
+def info_dxf(fonte: str) -> dict:
+    """Dimensões, base, centros de coluna, anéis e altura das bobinas.
+
+    Aceita um .dxf (extrai) ou um .json (pré-gerado, sem parse de DXF).
+    """
+    if fonte.endswith(".json"):
+        with open(fonte, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        d["aneis"] = [tuple(a) for a in d["aneis"]]
+        d["z_bob"] = tuple(d["z_bob"])
+        return d
+
+    geo = dxf_io.ler_dxf(fonte)
     L, W, H = (float(v) for v in geo.dimensoes())
     base = float(getattr(geo, "base_y", 0.0))
 
@@ -147,13 +182,13 @@ def info_dxf(dxf: str) -> dict:
     circ = [c for c in circ if c[2] >= rmin]
 
     centros = _cluster(sorted({cx for cx, _, _ in circ}), tol=120) if circ else [0.0]
-    # anéis: usa a coluna central (cx ~ 0) como conjunto canônico
     cx0 = min(centros, key=abs)
     raios = sorted({r for cx, _, r in circ if abs(cx - cx0) <= 120})
     raios = _cluster(raios, tol=18) if raios else []
-    aneis = []
-    for i in range(0, len(raios) - 1, 2):             # pares (r_int, r_ext)
-        aneis.append((raios[i], raios[i + 1]))
+    # intervalo radial real -> 3 enrolamentos concêntricos (melhor visualização)
+    r_in = raios[0] if raios else 160.0
+    r_out = raios[-1] if raios else 400.0
+    aneis = _tres_aneis(r_in, r_out)
 
     z0, z1 = _altura_bobinas(geo, H)
     return {"L": L, "W": W, "H": H, "base": base,

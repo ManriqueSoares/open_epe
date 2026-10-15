@@ -86,18 +86,20 @@ def _col_info(tr: Transformador, info):
 
 # ======================================================= elementos de cena
 def _nucleo(pl, tr, info):
+    """Núcleo completo: 3 pernas (cilindros) + culatras sup/inf (jugos)."""
     centros, r, (zc0, zc1) = _col_info(tr, info)
+    yoke_h = 1.6 * r if info else tr.nucleo.altura_culatra
+    # pernas (da culatra inferior à superior)
     for cx in centros:
         pl.add_mesh(pv.Cylinder(center=(cx * S, 0, (zc0 + zc1) / 2 * S),
                                 direction=(0, 0, 1), radius=r * S,
                                 height=(zc1 - zc0) * S, resolution=48),
                     color=COR_NUCLEO, smooth_shading=True)
-    if not info:   # culatras só no paramétrico (no DXF o hull já as mostra)
-        n = tr.nucleo
-        x0, x1 = centros[0], centros[-1]
-        z1 = n.altura_culatra + n.altura_janela
-        for (za, zb) in ((0.0, n.altura_culatra), (z1, z1 + n.altura_culatra)):
-            pl.add_mesh(_box((x0 - r, x1 + r, -r, r, za, zb)), color=COR_NUCLEO)
+    # culatras (jugos) horizontais ligando as pernas, abaixo e acima da janela
+    x0, x1 = centros[0], centros[-1]
+    for (za, zb) in ((zc0 - yoke_h, zc0), (zc1, zc1 + yoke_h)):
+        pl.add_mesh(_box((x0 - r, x1 + r, -r, r, za, zb)), color=COR_NUCLEO,
+                    smooth_shading=True)
 
 
 def _bobinas(pl, specs):
@@ -148,8 +150,9 @@ def _campo_eletrico_vol(pl, specs, dims, U, nx=120, ny=90, nz=40):
     bar = dict(title="Campo E (kV/mm)", color="white", title_font_size=14,
                label_font_size=11, n_labels=5, vertical=True,
                position_x=0.90, position_y=0.12, height=0.7, width=0.05)
-    # frio (seguro) transparente -> quente (crítico) opaco
-    opac = [0.0, 0.03, 0.08, 0.18, 0.35, 0.6, 0.85]
+    # frio (seguro): visível, só levemente transparente -> quente (crítico): opaco.
+    # Piso de opacidade mantém o azul visível; decaimento p/ transparente bem menor.
+    opac = [0.14, 0.18, 0.24, 0.32, 0.45, 0.65, 0.9]
     pl.add_volume(grid, scalars="E (kV/mm)", cmap="turbo", clim=[emin, emax],
                   opacity=opac, opacity_unit_distance=max(hy, hx) * S * 0.25,
                   scalar_bar_args=bar, show_scalar_bar=True)

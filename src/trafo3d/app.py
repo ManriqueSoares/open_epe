@@ -25,6 +25,9 @@ from .model import Transformador, Enrolamento, cor_enrol
 from .view3d import VISTAS
 from . import analysis as an
 from . import analysis_efcd as efcd
+from . import buchas as B
+from . import tcs as TC
+from . import config as CFG
 
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -66,7 +69,8 @@ def main(page: ft.Page):
     opts = {
         "mostrar_nucleo": True, "mostrar_bobinas": True, "mostrar_armadura": True,
         "mostrar_tanque": True, "analise_interacao": False,
-        "vista": "Isométrica", "cotas": True, "dxf": "",
+        "vista": "Isométrica", "cotas": True,
+        "dxf": CFG.DXF_PARTE_ATIVA if os.path.exists(CFG.DXF_PARTE_ATIVA) else "",
     }
 
     file_picker = ft.FilePicker()
@@ -301,25 +305,9 @@ def main(page: ft.Page):
                            value=opts["analise_interacao"], on_change=on_analise,
                            active_color=ft.Colors.PURPLE)
 
-    # DXF + tipo de tanque
-    dxf_label = ft.Text("DXF: nenhum (modo paramétrico)", size=11,
-                        color=ft.Colors.GREY_700)
-
-    async def carregar_dxf(e):
-        files = await file_picker.pick_files(
-            dialog_title="Selecione o DXF da parte ativa",
-            allowed_extensions=["dxf", "DXF"], allow_multiple=False)
-        if files and files[0].path:
-            opts["dxf"] = files[0].path
-            dxf_label.value = f"DXF: {os.path.basename(files[0].path)}"
-            dxf_label.color = ft.Colors.GREEN_800
-            atualizar()
-
-    def remover_dxf(e):
-        opts["dxf"] = ""
-        dxf_label.value = "DXF: nenhum (modo paramétrico)"
-        dxf_label.color = ft.Colors.GREY_700
-        atualizar()
+    # tipo de tanque + rótulo da fonte fixa (parte ativa)
+    _pa = os.path.basename(opts["dxf"]) if opts["dxf"] else "— (paramétrico)"
+    dxf_label = ft.Text(_pa, size=11, color=ft.Colors.GREEN_800)
 
     def on_tipo(e):
         tr.tanque.tipo = e.control.value
@@ -362,14 +350,10 @@ def main(page: ft.Page):
             ft.Row([ft.Text("Transparência do tanque", size=12), sl_opac],
                    spacing=6),
             ft.Container(content=ft.Column([
-                ft.Row([
-                    ft.FilledTonalButton("Carregar DXF", icon=ft.Icons.UPLOAD_FILE,
-                                         on_click=carregar_dxf),
-                    ft.IconButton(ft.Icons.CLOSE, tooltip="remover DXF",
-                                  on_click=remover_dxf),
-                ], spacing=6),
+                ft.Text("Parte ativa (fonte fixa)", weight=ft.FontWeight.BOLD,
+                        size=12, color=ft.Colors.CYAN_900),
                 dxf_label,
-            ], spacing=4), padding=10, border_radius=8,
+            ], spacing=2), padding=10, border_radius=8,
                 bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.CYAN_50)),
             ft.Container(content=ft.Column([
                 ft.Text("Análise", weight=ft.FontWeight.BOLD, size=13,
@@ -623,17 +607,379 @@ def main(page: ft.Page):
 
     aba_analise = ft.Row([analise_painel, analise_dir], spacing=0, expand=True)
 
+    # ===================================================== ABA BUCHAS
+    try:
+        _bperfil = (B.carregar_perfil(CFG.DXF_BUCHA)
+                    if os.path.exists(CFG.DXF_BUCHA) else None)
+    except Exception as _ex:
+        print("bucha fixa:", _ex)
+        _bperfil = None
+    bstate = {"perfil": _bperfil,
+              "path": CFG.DXF_BUCHA if _bperfil else ""}
+    bparams_path = os.path.join(tmpdir, "buchas.json")
+    bproc = {"p": None}
+
+    def _tfb(label, val, w=120):
+        return ft.TextField(label=label, value=str(val), width=w, dense=True,
+                            text_size=13, suffix=ft.Text("mm", size=10,
+                            color=ft.Colors.GREY_600))
+
+    b_n = ft.TextField(label="Nº buchas", value="3", width=90, dense=True,
+                       text_size=13)
+    b_Rar = _tfb("Raio proteção R_ar", 600, 150)
+    b_dapl = _tfb("Ø aplicação", 335, 120)
+    b_toque = _tfb("Toque mín", 50, 110)
+    b_passo = _tfb("Passo (eixos)", 985, 130)
+    b_U = ft.TextField(label="Tensão U", value="70", width=110, dense=True,
+                       text_size=13, suffix=ft.Text("kV", size=10,
+                       color=ft.Colors.GREY_600))
+    b_incl = ft.Slider(min=0, max=B.ANGULO_MAX, divisions=20, value=0,
+                       label="{value}°", expand=True)
+    _bl = (f"{os.path.basename(bstate['path'])} "
+           f"(h={bstate['perfil']['altura']:.0f} mm)" if bstate["perfil"]
+           else "bucha.dxf não encontrado em data/")
+    bdxf_label = ft.Text(_bl, size=11,
+                         color=ft.Colors.GREEN_800 if bstate["perfil"]
+                         else ft.Colors.RED_700)
+    bstatus = ft.Text("", size=12)
+    img_btopo = ft.Image(src="", fit=ft.BoxFit.CONTAIN, width=620)
+    img_belev = ft.Image(src="", fit=ft.BoxFit.CONTAIN, width=620)
+    img_best = ft.Image(src="", fit=ft.BoxFit.CONTAIN, width=460)
+    b_contato = ft.Column(spacing=2)
+    b_estudo = ft.Column(spacing=2)
+
+    def _bf(tf, default):
+        try:
+            return float(str(tf.value).replace(",", "."))
+        except (ValueError, TypeError):
+            return default
+
+    def calcular_buchas(_=None):
+        if not bstate["perfil"]:
+            bstatus.value = "Carregue um DXF de bucha primeiro."
+            bstatus.color = ft.Colors.ORANGE_800
+            page.update()
+            return
+        perf = bstate["perfil"]
+        n = max(2, int(_bf(b_n, 3)))
+        R_ar, d_apl = _bf(b_Rar, 600), _bf(b_dapl, 335)
+        toque, passo = _bf(b_toque, 50), _bf(b_passo, 985)
+        U, ang = _bf(b_U, 70), float(b_incl.value)
+        braco = perf["altura"]
+        tops = B.posicoes_topo(n, passo, R_ar, d_apl, braco, ang)
+        ct = B.contatos(tops, R_ar, d_apl, toque)
+        op = B.estudo_inclinacao(R_ar, d_apl, toque, braco, passo, n)
+        melhor = B.melhor_inclinacao(op)
+
+        img_btopo.src = _datauri(B.fig_to_png(B.fig_topo(tops, R_ar, d_apl, U, ct)))
+        img_belev.src = _datauri(B.fig_to_png(
+            B.fig_elevacao(perf, tops, R_ar, d_apl, ang, braco)))
+        img_best.src = _datauri(B.fig_to_png(B.fig_estudo(op, toque)))
+
+        cabec = ft.Row([ft.Text("Par", size=12, width=90, weight=ft.FontWeight.BOLD),
+                        ft.Text("Sep [mm]", size=12, width=90,
+                                weight=ft.FontWeight.BOLD),
+                        ft.Text("Folga [mm]", size=12, width=90,
+                                weight=ft.FontWeight.BOLD),
+                        ft.Text("Status", size=12, width=80,
+                                weight=ft.FontWeight.BOLD)], spacing=6)
+        linhas = [cabec]
+        for c in ct:
+            cor = ft.Colors.GREEN_800 if c["ok"] else ft.Colors.RED_700
+            linhas.append(ft.Row([
+                ft.Text(c["par"], size=12, width=90),
+                ft.Text(f"{c['sep']:.0f}", size=12, width=90),
+                ft.Text(f"{c['folga']:.0f}", size=12, width=90, color=cor),
+                ft.Text("OK" if c["ok"] else "CONTATO", size=12, width=80,
+                        color=cor, weight=ft.FontWeight.BOLD),
+            ], spacing=6))
+        b_contato.controls = linhas
+
+        est = [ft.Row([ft.Text("Inclinação", size=12, width=90,
+                               weight=ft.FontWeight.BOLD),
+                       ft.Text("Separação", size=12, width=90,
+                               weight=ft.FontWeight.BOLD),
+                       ft.Text("Folga ar", size=12, width=90,
+                               weight=ft.FontWeight.BOLD)], spacing=6)]
+        for o in op:
+            cor = ft.Colors.GREEN_800 if o["ok"] else ft.Colors.RED_700
+            est.append(ft.Row([
+                ft.Text(f"{o['ang']:.0f}°", size=12, width=90),
+                ft.Text(f"{o['sep']:.0f}", size=12, width=90),
+                ft.Text(f"{o['folga']:.0f}", size=12, width=90, color=cor),
+            ], spacing=6))
+        b_estudo.controls = est
+
+        if melhor:
+            bstatus.value = (f"Menor inclinação que elimina contato: "
+                             f"{melhor['ang']:.0f}° (folga {melhor['folga']:.0f} mm).")
+            bstatus.color = ft.Colors.GREEN_800
+        else:
+            bstatus.value = "Nenhuma inclinação até 20° elimina o contato."
+            bstatus.color = ft.Colors.RED_700
+        page.update()
+
+    def abrir_buchas_3d(_=None):
+        if not bstate["path"]:
+            bstatus.value = "Carregue um DXF de bucha primeiro."
+            bstatus.color = ft.Colors.ORANGE_800
+            page.update()
+            return
+        params = {"dxf": bstate["path"], "n": int(_bf(b_n, 3)),
+                  "passo": _bf(b_passo, 985), "ang": float(b_incl.value),
+                  "R_ar": _bf(b_Rar, 600), "d_apl": _bf(b_dapl, 335),
+                  "U": _bf(b_U, 70)}
+        with open(bparams_path, "w", encoding="utf-8") as f:
+            json.dump(params, f)
+        p = bproc["p"]
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        bproc["p"] = subprocess.Popen(
+            [PYEXE, "-m", "src.trafo3d.buchas_view3d", bparams_path], cwd=ROOT)
+        bstatus.value = "Janela 3D das buchas aberta."
+        bstatus.color = ft.Colors.BLUE_800
+        page.update()
+
+    b_incl.on_change_end = calcular_buchas
+    for _tf in (b_n, b_Rar, b_dapl, b_toque, b_passo, b_U):
+        _tf.on_blur = calcular_buchas
+        _tf.on_submit = calcular_buchas
+
+    buchas_painel = ft.Container(
+        width=420, bgcolor=ft.Colors.GREY_50, padding=14,
+        content=ft.Column([
+            ft.Text("Estudo de buchas (AT)", size=18, weight=ft.FontWeight.BOLD,
+                    color=ft.Colors.BLUE_900),
+            ft.Text("Raio de proteção, distância entre buchas e inclinação. "
+                    "R_ar, Ø e toque: dados do banco/norma (preencha).",
+                    size=11, color=ft.Colors.GREY_700),
+            ft.Text("Bucha (fonte fixa)", weight=ft.FontWeight.BOLD, size=12,
+                    color=ft.Colors.CYAN_900),
+            bdxf_label,
+            ft.Divider(height=8),
+            ft.Row([b_n, b_U], spacing=8),
+            ft.Row([b_Rar, b_dapl], spacing=8),
+            ft.Row([b_toque, b_passo], spacing=8),
+            ft.Row([ft.Text("Inclinação externas (base fixa, topo p/ fora)",
+                            size=11), b_incl], spacing=6),
+            ft.Row([
+                ft.FilledButton("Calcular", icon=ft.Icons.CALCULATE,
+                                on_click=calcular_buchas),
+                ft.OutlinedButton("Abrir 3D das buchas", icon=ft.Icons.VIEW_IN_AR,
+                                  on_click=abrir_buchas_3d),
+            ], spacing=8),
+            bstatus,
+            ft.Divider(height=8),
+            ft.Text("Contato entre buchas", weight=ft.FontWeight.BOLD, size=13),
+            b_contato,
+            ft.Divider(height=8),
+            ft.Text("Estudo de inclinação", weight=ft.FontWeight.BOLD, size=13),
+            b_estudo,
+        ], spacing=8, scroll=ft.ScrollMode.AUTO, expand=True))
+
+    buchas_dir = ft.Container(
+        expand=True, padding=14,
+        content=ft.Column([img_btopo, img_belev, img_best],
+                          spacing=10, scroll=ft.ScrollMode.AUTO, expand=True))
+
+    aba_buchas = ft.Row([buchas_painel, buchas_dir], spacing=0, expand=True)
+
+    # ===================================================== ABA TCs
+    tc_state = {0: [], 1: [], 2: []}
+    tc_refs = []
+    tcparams_path = os.path.join(tmpdir, "tcs.json")
+    tcproc = {"p": None}
+
+    tc_fase = ft.Dropdown(label="Fase", value="0", width=120, dense=True,
+                          options=[ft.DropdownOption(key="0", text="H1"),
+                                   ft.DropdownOption(key="1", text="H2"),
+                                   ft.DropdownOption(key="2", text="H3")])
+    tc_caneco = ft.TextField(label="Ø caneco", value="400", width=120, dense=True,
+                             text_size=13, suffix=ft.Text("mm", size=10))
+    tc_L6 = ft.TextField(label="L6", value="500", width=110, dense=True,
+                         text_size=13, suffix=ft.Text("mm", size=10))
+    tc_bushr = ft.TextField(label="Raio bucha (base)", value="60", width=140,
+                            dense=True, text_size=13, suffix=ft.Text("mm", size=10))
+    tc_box = ft.Column(spacing=6)
+    tc_status = ft.Text("", size=12)
+    tc_img = ft.Image(src="", fit=ft.BoxFit.CONTAIN, width=420)
+    tc_viab = ft.Column(spacing=2)
+
+    def _fase_sel():
+        return int(tc_fase.value or "0")
+
+    def _tctf(val):
+        return ft.TextField(value=str(val), width=70, dense=True, text_size=12)
+
+    def render_tc():
+        tc_refs.clear()
+        lst = tc_state[_fase_sel()]
+        rows = [ft.Row([ft.Text("Nome", size=10, width=70),
+                        ft.Text("DINT", size=10, width=70),
+                        ft.Text("DEXT", size=10, width=70),
+                        ft.Text("ALT", size=10, width=70),
+                        ft.Text("KG", size=10, width=70)], spacing=6)]
+        for i, t in enumerate(lst):
+            ref = {"nome": _tctf(t.get("nome", f"TC{i+1}")),
+                   "DINT": _tctf(t.get("DINT", "")), "DEXT": _tctf(t.get("DEXT", "")),
+                   "ALT": _tctf(t.get("ALT", "")), "KG": _tctf(t.get("KG", ""))}
+            tc_refs.append(ref)
+
+            def rem(_, idx=i):
+                tc_state[_fase_sel()].pop(idx)
+                render_tc(); calcular_tcs()
+
+            rows.append(ft.Row([ref["nome"], ref["DINT"], ref["DEXT"], ref["ALT"],
+                                ref["KG"],
+                                ft.IconButton(ft.Icons.DELETE_OUTLINE, icon_size=16,
+                                              on_click=rem)], spacing=6))
+
+        def add(_):
+            tc_state[_fase_sel()].append({"nome": f"TC{len(lst)+1}", "DINT": "",
+                                          "DEXT": "", "ALT": "", "KG": ""})
+            render_tc(); page.update()
+
+        rows.append(ft.TextButton("Adicionar TC", icon=ft.Icons.ADD, on_click=add))
+        tc_box.controls = rows
+
+    def ler_tc():
+        lst = tc_state[_fase_sel()]
+        for t, ref in zip(lst, tc_refs):
+            for k in ("nome", "DINT", "DEXT", "ALT", "KG"):
+                t[k] = ref[k].value
+
+    def _tcs_num(lst):
+        out = []
+        for t in lst:
+            try:
+                out.append({"nome": t.get("nome", "TC"),
+                            "DINT": float(t["DINT"]), "DEXT": float(t["DEXT"]),
+                            "ALT": float(t["ALT"]), "KG": float(t.get("KG") or 0)})
+            except (ValueError, TypeError, KeyError):
+                pass
+        return out
+
+    def calcular_tcs(_=None):
+        ler_tc()
+        try:
+            caneco_d, L6 = float(tc_caneco.value), float(tc_L6.value)
+            bushr = float(tc_bushr.value)
+        except (ValueError, TypeError):
+            tc_status.value = "⚠ Ø caneco / L6 / raio inválidos."
+            tc_status.color = ft.Colors.ORANGE_800; page.update(); return
+        f = _fase_sel()
+        tcn = _tcs_num(tc_state[f])
+        v = TC.viabilidade(tcn, caneco_d, L6, bushr)
+        tc_img.src = _datauri(TC.fig_to_png(TC.fig_elevacao_tc(
+            tcn, caneco_d, L6, bushr, f"Fase H{f+1} — espaço para TCs")))
+        rows = [ft.Row([ft.Text("Resumo", size=12, weight=ft.FontWeight.BOLD,
+                                expand=True),
+                        ft.Text("OK" if v["ok"] else "NÃO CABE", size=12,
+                                weight=ft.FontWeight.BOLD,
+                                color=ft.Colors.GREEN_800 if v["ok"]
+                                else ft.Colors.RED_700)]),
+                ft.Text(f"Rs={v['Rs']:.0f} mm · pilha={v['altura_pilha']:.0f} mm "
+                        f"· folga altura={v['folga_altura']:.0f} mm", size=11)]
+        for it in v["itens"]:
+            cor = ft.Colors.GREEN_800 if it["ok"] else ft.Colors.RED_700
+            rows.append(ft.Row([
+                ft.Text(it["nome"], size=12, expand=True),
+                ft.Text(f"radial {it['fora_raio']:+.0f}", size=11, color=cor),
+                ft.Text("OK" if it["ok"] else "FURA", size=12, color=cor,
+                        weight=ft.FontWeight.BOLD)], spacing=6))
+        tc_viab.controls = rows
+        tc_status.value = f"Fase H{f+1} calculada."
+        tc_status.color = ft.Colors.GREEN_800
+        page.update()
+
+    def abrir_tcs_3d(_=None):
+        if not bstate["path"]:
+            tc_status.value = "Carregue o DXF da bucha na aba Buchas primeiro."
+            tc_status.color = ft.Colors.ORANGE_800; page.update(); return
+        ler_tc()
+        try:
+            caneco_d, L6 = float(tc_caneco.value), float(tc_L6.value)
+            bushr = float(tc_bushr.value)
+        except (ValueError, TypeError):
+            tc_status.value = "⚠ valores inválidos."; page.update(); return
+        params = {"dxf": bstate["path"], "n": int(_bf(b_n, 3)),
+                  "passo": _bf(b_passo, 985), "ang": float(b_incl.value),
+                  "caneco_d": caneco_d, "L6": L6, "bucha_r": bushr,
+                  "tcs": [_tcs_num(tc_state.get(i, [])) for i in range(3)]}
+        with open(tcparams_path, "w", encoding="utf-8") as f:
+            json.dump(params, f)
+        p = tcproc["p"]
+        if p and p.poll() is None:
+            try:
+                p.terminate()
+            except Exception:
+                pass
+        tcproc["p"] = subprocess.Popen(
+            [PYEXE, "-m", "src.trafo3d.tcs_view3d", tcparams_path], cwd=ROOT)
+        tc_status.value = "Janela 3D dos TCs aberta."
+        tc_status.color = ft.Colors.BLUE_800; page.update()
+
+    def on_tc_fase(e):
+        render_tc(); calcular_tcs()
+
+    tc_fase.on_select = on_tc_fase
+    for _t in (tc_caneco, tc_L6, tc_bushr):
+        _t.on_blur = calcular_tcs
+        _t.on_submit = calcular_tcs
+    render_tc()
+
+    tcs_painel = ft.Container(
+        width=470, bgcolor=ft.Colors.GREY_50, padding=14,
+        content=ft.Column([
+            ft.Text("Espaço para TCs", size=18, weight=ft.FontWeight.BOLD,
+                    color=ft.Colors.BLUE_900),
+            ft.Text("Zona segura = cilindro L6 (raio caneco−40) + cone 60°. "
+                    "TCs empilhados por peso. Usa a bucha/inclinação da aba Buchas.",
+                    size=11, color=ft.Colors.GREY_700),
+            ft.Row([tc_caneco, tc_L6], spacing=8),
+            ft.Row([tc_bushr, tc_fase], spacing=8),
+            ft.Text("TCs da fase (DINT/DEXT/ALT em mm, KG em kg)",
+                    weight=ft.FontWeight.BOLD, size=13, color=ft.Colors.BLUE_900),
+            ft.Container(content=tc_box, padding=ft.Padding(8, 8, 8, 8),
+                         border_radius=8,
+                         bgcolor=ft.Colors.with_opacity(0.5, ft.Colors.AMBER_50)),
+            ft.Row([
+                ft.FilledButton("Calcular", icon=ft.Icons.CALCULATE,
+                                on_click=calcular_tcs),
+                ft.OutlinedButton("Abrir 3D dos TCs", icon=ft.Icons.VIEW_IN_AR,
+                                  on_click=abrir_tcs_3d),
+            ], spacing=8),
+            tc_status,
+            ft.Divider(height=8),
+            ft.Text("Viabilidade", weight=ft.FontWeight.BOLD, size=13),
+            tc_viab,
+        ], spacing=8, scroll=ft.ScrollMode.AUTO, expand=True))
+
+    tcs_dir = ft.Container(expand=True, padding=14,
+                           content=ft.Column([tc_img], spacing=10,
+                                             scroll=ft.ScrollMode.AUTO, expand=True))
+    aba_tcs = ft.Row([tcs_painel, tcs_dir], spacing=0, expand=True)
+
     tabs = ft.Tabs(
-        length=2, expand=True,
+        length=4, expand=True,
         content=ft.Column([
             ft.TabBar(tabs=[ft.Tab(label="Modelo 3D", icon=ft.Icons.VIEW_IN_AR),
-                            ft.Tab(label="Análise", icon=ft.Icons.INSIGHTS)]),
-            ft.TabBarView(controls=[aba_modelo, aba_analise], expand=True),
+                            ft.Tab(label="Análise", icon=ft.Icons.INSIGHTS),
+                            ft.Tab(label="Buchas", icon=ft.Icons.BOLT),
+                            ft.Tab(label="TCs", icon=ft.Icons.DONUT_LARGE)]),
+            ft.TabBarView(controls=[aba_modelo, aba_analise, aba_buchas, aba_tcs],
+                          expand=True),
         ], expand=True))
 
     page.add(tabs)
     atualizar()
     calcular_analise()   # popula a aba Análise já na abertura
+    if bstate["perfil"]:
+        calcular_buchas()
+        calcular_tcs()
 
 
 def run():
