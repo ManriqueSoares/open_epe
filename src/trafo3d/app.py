@@ -69,6 +69,7 @@ def main(page: ft.Page):
     opts = {
         "mostrar_nucleo": True, "mostrar_bobinas": True, "mostrar_armadura": True,
         "mostrar_tanque": True, "analise_interacao": False,
+        "grad_extensao": 1.0,
         "vista": "Isométrica", "cotas": True,
         "dxf": CFG.DXF_PARTE_ATIVA if os.path.exists(CFG.DXF_PARTE_ATIVA) else "",
     }
@@ -305,6 +306,24 @@ def main(page: ft.Page):
                            value=opts["analise_interacao"], on_change=on_analise,
                            active_color=ft.Colors.PURPLE)
 
+    # intensidade (alcance) do campo elétrico: × a distância mínima de segurança
+    grad_val = ft.Text(f"{opts['grad_extensao']:.1f}× dist. mín.", size=11,
+                       color=ft.Colors.GREY_700)
+
+    def on_grad(e):
+        opts["grad_extensao"] = round(float(e.control.value), 2)
+        grad_val.value = f"{opts['grad_extensao']:.1f}× dist. mín."
+        atualizar()
+
+    def on_grad_live(e):
+        grad_val.value = f"{float(e.control.value):.1f}× dist. mín."
+        page.update()
+
+    sl_grad = ft.Slider(min=0.3, max=2.5, divisions=22, value=opts["grad_extensao"],
+                        label="{value}×", on_change=on_grad_live,
+                        on_change_end=on_grad, active_color=ft.Colors.PURPLE,
+                        expand=True)
+
     # tipo de tanque + rótulo da fonte fixa (parte ativa)
     _pa = os.path.basename(opts["dxf"]) if opts["dxf"] else "— (paramétrico)"
     dxf_label = ft.Text(_pa, size=11, color=ft.Colors.GREEN_800)
@@ -357,7 +376,13 @@ def main(page: ft.Page):
                 bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.CYAN_50)),
             ft.Container(content=ft.Column([
                 ft.Text("Análise", weight=ft.FontWeight.BOLD, size=13,
-                        color=ft.Colors.PURPLE_900), sw_analise], spacing=4),
+                        color=ft.Colors.PURPLE_900), sw_analise,
+                ft.Row([ft.Text("Intensidade do campo", size=12), grad_val],
+                       spacing=6, alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
+                sl_grad,
+                ft.Text("azul = seguro · vermelho = atingiu a dist. mínima",
+                        size=10, color=ft.Colors.GREY_600),
+                ], spacing=4),
                 padding=10, border_radius=8,
                 bgcolor=ft.Colors.with_opacity(0.4, ft.Colors.PURPLE_50)),
             ft.Text("Exibir", weight=ft.FontWeight.BOLD, size=13),
@@ -789,6 +814,7 @@ def main(page: ft.Page):
 
     # ===================================================== ABA TCs
     tc_state = {0: [], 1: [], 2: []}
+    tc_prev = {"f": 0}                      # fase atualmente exibida (p/ salvar ao trocar)
     tc_refs = []
     tcparams_path = os.path.join(tmpdir, "tcs.json")
     tcproc = {"p": None}
@@ -803,6 +829,8 @@ def main(page: ft.Page):
                          text_size=13, suffix=ft.Text("mm", size=10))
     tc_bushr = ft.TextField(label="Raio bucha (base)", value="60", width=140,
                             dense=True, text_size=13, suffix=ft.Text("mm", size=10))
+    tc_foco = ft.Switch(label="Uma bucha por vez (foco nos TCs)", value=True,
+                        active_color=ft.Colors.BLUE)
     tc_box = ft.Column(spacing=6)
     tc_status = ft.Text("", size=12)
     tc_img = ft.Image(src="", fit=ft.BoxFit.CONTAIN, width=420)
@@ -829,6 +857,7 @@ def main(page: ft.Page):
             tc_refs.append(ref)
 
             def rem(_, idx=i):
+                ler_tc()                       # preserva o que já foi digitado
                 tc_state[_fase_sel()].pop(idx)
                 render_tc(); calcular_tcs()
 
@@ -838,18 +867,23 @@ def main(page: ft.Page):
                                               on_click=rem)], spacing=6))
 
         def add(_):
-            tc_state[_fase_sel()].append({"nome": f"TC{len(lst)+1}", "DINT": "",
-                                          "DEXT": "", "ALT": "", "KG": ""})
+            ler_tc()                           # preserva o que já foi digitado
+            lst_atual = tc_state[_fase_sel()]
+            lst_atual.append({"nome": f"TC{len(lst_atual)+1}", "DINT": "",
+                              "DEXT": "", "ALT": "", "KG": ""})
             render_tc(); page.update()
 
         rows.append(ft.TextButton("Adicionar TC", icon=ft.Icons.ADD, on_click=add))
         tc_box.controls = rows
 
-    def ler_tc():
-        lst = tc_state[_fase_sel()]
-        for t, ref in zip(lst, tc_refs):
+    def ler_tc_para(f):
+        """Grava os valores dos campos atualmente exibidos na fase `f`."""
+        for t, ref in zip(tc_state[f], tc_refs):
             for k in ("nome", "DINT", "DEXT", "ALT", "KG"):
                 t[k] = ref[k].value
+
+    def ler_tc():
+        ler_tc_para(_fase_sel())
 
     def _tcs_num(lst):
         out = []
@@ -908,6 +942,7 @@ def main(page: ft.Page):
         params = {"dxf": bstate["path"], "n": int(_bf(b_n, 3)),
                   "passo": _bf(b_passo, 985), "ang": float(b_incl.value),
                   "caneco_d": caneco_d, "L6": L6, "bucha_r": bushr,
+                  "foco_fase": (_fase_sel() if tc_foco.value else -1),
                   "tcs": [_tcs_num(tc_state.get(i, [])) for i in range(3)]}
         with open(tcparams_path, "w", encoding="utf-8") as f:
             json.dump(params, f)
@@ -923,6 +958,8 @@ def main(page: ft.Page):
         tc_status.color = ft.Colors.BLUE_800; page.update()
 
     def on_tc_fase(e):
+        ler_tc_para(tc_prev["f"])          # salva a fase que estava aberta
+        tc_prev["f"] = _fase_sel()
         render_tc(); calcular_tcs()
 
     tc_fase.on_select = on_tc_fase
@@ -941,6 +978,7 @@ def main(page: ft.Page):
                     size=11, color=ft.Colors.GREY_700),
             ft.Row([tc_caneco, tc_L6], spacing=8),
             ft.Row([tc_bushr, tc_fase], spacing=8),
+            tc_foco,
             ft.Text("TCs da fase (DINT/DEXT/ALT em mm, KG em kg)",
                     weight=ft.FontWeight.BOLD, size=13, color=ft.Colors.BLUE_900),
             ft.Container(content=tc_box, padding=ft.Padding(8, 8, 8, 8),

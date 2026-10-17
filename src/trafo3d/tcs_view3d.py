@@ -48,6 +48,12 @@ def construir(params, off_screen=False):
     L6 = float(params["L6"])
     bucha_r = float(params.get("bucha_r", 60.0))
     tcs_fases = params.get("tcs", [[] for _ in range(n)])
+    # foco_fase: -1 = todas as fases; 0/1/2 = isola essa bucha e foca nos TCs
+    foco = params.get("foco_fase", -1)
+    try:
+        foco = int(foco)
+    except (TypeError, ValueError):
+        foco = -1
     base = BU.centros(n, passo)
     Rs = T.raio_seguro(caneco_d)
     rc = caneco_d / 2
@@ -63,6 +69,8 @@ def construir(params, off_screen=False):
     bucha0 = BV._bucha_mesh(perfil)
     fases = []
     for i, cx in enumerate(base):
+        if 0 <= foco < n and i != foco:
+            continue                               # mostra só a fase em foco
         phi = -ang if i == 0 else (ang if i == n - 1 else 0.0)
         fases.append((cx, phi))
         # bucha (porcelana, acima da tampa)
@@ -128,9 +136,26 @@ def construir(params, off_screen=False):
                   opacity=opac, opacity_unit_distance=rc * S * 0.6,
                   scalar_bar_args=bar, show_scalar_bar=True)
 
-    pl.add_text(f"trafo3d — espaço para TCs (incl. {ang:.0f}°)", font_size=10,
-                color="white")
+    rotulo = f"trafo3d — espaço para TCs (incl. {ang:.0f}°)"
+    if 0 <= foco < n:
+        rotulo += f" — foco fase H{foco + 1}"
+    pl.add_text(rotulo, font_size=10, color="white")
+
     pl.view_isometric()
+    # com foco: enquadra a câmera na região do caneco/TCs (ignora a porcelana alta)
+    if 0 <= foco < n and fases:
+        cxf, phif = fases[0]
+        dxf_end = cxf + _down_dir(phif)[0] * L_can
+        xlo = min(cxf, dxf_end) - rc - 10
+        xhi = max(cxf, dxf_end) + rc + 10
+        zlo, zhi = -(L_can + 10), T.TOPO_GAP + 60
+        fp = np.array([(xlo + xhi) / 2, 0.0, (zlo + zhi) / 2]) * S
+        tam = max(xhi - xlo, zhi - zlo, 2 * (rc + 10)) * S
+        dirv = np.array([1.0, -1.0, 0.45]); dirv /= np.linalg.norm(dirv)
+        pl.camera.focal_point = tuple(fp)
+        pl.camera.position = tuple(fp + dirv * tam * 2.2)
+        pl.camera.up = (0.0, 0.0, 1.0)
+        pl.reset_camera_clipping_range()
     return pl
 
 

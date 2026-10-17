@@ -30,6 +30,32 @@ COR_NUCLEO = (0.55, 0.58, 0.62)
 FUNDO = "#0d1117"
 CMAP_FOLGA = "RdBu"
 
+# --- Gradiente bobina -> tanque (ajuste visual) -------------------------
+# Distância mínima FICTÍCIA bob<->tanque usada no teste = fator * folga real.
+# <1.0 garante que o gradiente fique contido dentro da folga (teste 1).
+GRAD_DMIN_FATOR = 0.55
+# Até onde o volume é desenhado, em unidades de d_min:
+#   1.0 -> contido na distância mínima (teste 1);
+#   >1  -> ultrapassa, irradiando para fora do tanque (versão futura).
+GRAD_EXTENSAO = 1.0
+
+_CMAP_BOB_TANQUE = None
+
+
+def _cmap_bob_tanque():
+    """Colormap do gradiente: azul (junto da bobina) -> vermelho (folga mín.)."""
+    global _CMAP_BOB_TANQUE
+    if _CMAP_BOB_TANQUE is None:
+        from matplotlib.colors import LinearSegmentedColormap
+        _CMAP_BOB_TANQUE = LinearSegmentedColormap.from_list(
+            "bob_tanque",
+            [(0.00, "#1e5bff"),   # azul      — junto da bobina
+             (0.55, "#2aa8ff"),   # azul claro — azul domina a maior parte
+             (0.78, "#19c6e6"),   # ciano     — aproximando da folga mínima
+             (0.90, "#ffb400"),   # âmbar     — quase na distância mínima
+             (1.00, "#ff2800")])  # vermelho  — anel crítico na distância mínima
+    return _CMAP_BOB_TANQUE
+
 
 # ======================================================= geometria básica
 def _box(bounds):
@@ -108,13 +134,22 @@ def _bobinas(pl, specs):
         pl.add_mesh(tubo, color=cor, smooth_shading=True, opacity=0.95)
 
 
-def _campo_eletrico_vol(pl, specs, dims, U, nx=120, ny=90, nz=40):
-    """Campo elétrico bobina->tanque como VOLUME (irradia da bobina à parede).
+def _campo_eletrico_vol(pl, specs, dims, U, d_min=None, extensao=None,
+                        nx=140, ny=110, nz=48):
+    """Gradiente de proximidade bobina->tanque como VOLUME.
 
-    Quente = campo alto (distância crítica, perto da bobina);
-    frio = campo baixo (folga segura, perto do tanque).
-    Modelo coaxial simplificado por coluna: E = U / (r·ln(R/r0)).
+    Colore pela distância à superfície da bobina mais próxima, normalizada
+    pela DISTÂNCIA MÍNIMA bob<->tanque (d_min):
+        azul      (t=0) -> junto da bobina (início do gradiente);
+        vermelho  (t=1) -> ao atingir a distância mínima.
+
+    `extensao` (em unidades de d_min) limita até onde o volume é desenhado:
+        1.0 -> fica contido dentro da folga mínima (teste visual);
+        >1  -> ultrapassa, irradiando para fora do tanque, saturando em
+               vermelho além da distância mínima.
     """
+    if extensao is None:
+        extensao = GRAD_EXTENSAO
     # raio externo e faixa z por coluna
     cols = {}
     for cx, _ri, re, z0, z1, _c in specs:
@@ -125,36 +160,45 @@ def _campo_eletrico_vol(pl, specs, dims, U, nx=120, ny=90, nz=40):
         return
     hx, hy = dims["hx"], dims["hy"]
     r0 = max(c["r"] for c in cols.values())
-    R = r0 + max(hy - r0, 1.0)
     zc0 = min(c["z0"] for c in cols.values())
     zc1 = max(c["z1"] for c in cols.values())
+
+    # folga REAL até a parede mais próxima (radial em Y e em X das colunas externas)
+    cx_out = max(abs(cx) for cx in cols)
+    gap = max(min(hy - r0, hx - (cx_out + r0)), 1.0)
+    if d_min is None:
+        d_min = GRAD_DMIN_FATOR * gap   # fictícia: menor que a folga real (teste 1)
 
     xs = np.linspace(-hx, hx, nx)
     ys = np.linspace(-hy, hy, ny)
     zs = np.linspace(zc0, zc1, nz)
     X, Y, _Z = np.meshgrid(xs, ys, zs, indexing="ij")
-    E = np.zeros_like(X)
+    # distância à superfície da bobina mais próxima
+    d = np.full_like(X, np.inf)
     for cx, c in cols.items():
-        r = np.hypot(X - cx, Y)
-        rc = np.clip(r, c["r"], R)
-        Ec = U / (rc * np.log(R / c["r"]))
-        E = np.maximum(E, Ec)
+        d = np.minimum(d, np.hypot(X - cx, Y) - c["r"])
+    t = d / d_min                       # 0 na bobina, 1 na distância mínima
+
+    # cor satura em vermelho ao atingir a folga mínima (t>=1);
+    # só é desenhado entre a bobina (t=0) e o limite `extensao` (resto transparente).
+    cor_t = np.clip(t, 0.0, 1.0)
+    visivel = (t >= 0.0) & (t <= extensao)
+    s = np.where(visivel, cor_t, -1.0)  # -1 (fora do clim) -> transparente
 
     grid = pv.ImageData(
         dimensions=(nx, ny, nz),
         spacing=(2 * hx / (nx - 1) * S, 2 * hy / (ny - 1) * S,
                  (zc1 - zc0) / (nz - 1) * S),
         origin=(-hx * S, -hy * S, zc0 * S))
-    grid["E (kV/mm)"] = E.flatten(order="F")
-    emin, emax = float(E.min()), float(E.max())
-    bar = dict(title="Campo E (kV/mm)", color="white", title_font_size=14,
-               label_font_size=11, n_labels=5, vertical=True,
+    grid["t"] = s.flatten(order="F")
+    bar = dict(title="bobina -> folga min.", color="white", title_font_size=13,
+               label_font_size=11, n_labels=3, vertical=True,
                position_x=0.90, position_y=0.12, height=0.7, width=0.05)
-    # frio (seguro): visível, só levemente transparente -> quente (crítico): opaco.
-    # Piso de opacidade mantém o azul visível; decaimento p/ transparente bem menor.
-    opac = [0.14, 0.18, 0.24, 0.32, 0.45, 0.65, 0.9]
-    pl.add_volume(grid, scalars="E (kV/mm)", cmap="turbo", clim=[emin, emax],
-                  opacity=opac, opacity_unit_distance=max(hy, hx) * S * 0.25,
+    # azul translúcido junto da bobina -> vermelho opaco na folga mínima.
+    # 1ª entrada = 0 (t=0 e região mascarada ficam transparentes).
+    opac = [0.0, 0.12, 0.18, 0.26, 0.36, 0.52, 0.74, 0.93]
+    pl.add_volume(grid, scalars="t", cmap=_cmap_bob_tanque(), clim=[0.0, 1.0],
+                  opacity=opac, opacity_unit_distance=max(hy, hx) * S * 0.22,
                   scalar_bar_args=bar, show_scalar_bar=True)
 
 
@@ -314,7 +358,9 @@ def construir(tr: Transformador, opts: dict, off_screen=False):
         _bobinas(pl, specs)
     if analise:
         try:
-            _campo_eletrico_vol(pl, specs, dims, float(opts.get("U", 70.0)))
+            ext = float(opts.get("grad_extensao", GRAD_EXTENSAO))
+            _campo_eletrico_vol(pl, specs, dims, float(opts.get("U", 70.0)),
+                                extensao=ext)
         except Exception as e:
             print("[campo] falhou:", e)
     if opts.get("mostrar_armadura", True):

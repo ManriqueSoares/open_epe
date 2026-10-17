@@ -66,6 +66,24 @@ def metricas(perfil: dict, A: float | None, B: float | None) -> dict:
 
 
 # --------------------------------------------------------------- figuras
+# Mesma paleta do 3D principal: azul (junto da bobina) -> vermelho (na parede).
+_CMAP_BOB_TANQUE = None
+
+
+def _cmap_bob_tanque():
+    global _CMAP_BOB_TANQUE
+    if _CMAP_BOB_TANQUE is None:
+        from matplotlib.colors import LinearSegmentedColormap
+        _CMAP_BOB_TANQUE = LinearSegmentedColormap.from_list(
+            "bob_tanque",
+            [(0.00, "#1e5bff"),   # azul      — junto da bobina
+             (0.55, "#2aa8ff"),   # azul claro
+             (0.78, "#19c6e6"),   # ciano
+             (0.90, "#ffb400"),   # âmbar
+             (1.00, "#ff2800")])  # vermelho  — na parede do tanque
+    return _CMAP_BOB_TANQUE
+
+
 def fig_tensao(perfil: dict):
     fig, ax = plt.subplots(figsize=(6.2, 3.6), dpi=110)
     ax.plot(perfil["x"], perfil["V"], color="#2a7f3f", lw=2)
@@ -94,23 +112,25 @@ def fig_stress(perfil: dict, A=None, B=None, nome=""):
 
 
 def fig_campo2d(perfil: dict, npx: int = 260):
-    """Heatmap radial do campo (condutor ao centro -> parede)."""
-    R, r0, U = perfil["R"], perfil["r0"], perfil["U"]
-    lnRr = np.log(R / r0)
+    """Heatmap radial por PROXIMIDADE (igual ao 3D principal):
+    azul junto da bobina (distância 0) -> vermelho na parede (distância = gap)."""
+    R, r0, gap = perfil["R"], perfil["r0"], perfil["gap"]
     g = np.linspace(-R, R, npx)
     X, Y = np.meshgrid(g, g)
     rr = np.hypot(X, Y)
-    E = np.full_like(rr, np.nan)
+    dist = np.full_like(rr, np.nan)
     mask = (rr >= r0) & (rr <= R)
-    E[mask] = U / (rr[mask] * lnRr)
+    dist[mask] = rr[mask] - r0                  # distância da superfície da bobina
     fig, ax = plt.subplots(figsize=(4.2, 4.0), dpi=110)
-    im = ax.imshow(E, extent=[-R, R, -R, R], origin="lower", cmap="turbo")
+    im = ax.imshow(dist, extent=[-R, R, -R, R], origin="lower",
+                   cmap=_cmap_bob_tanque(), vmin=0.0, vmax=gap)
     circ = plt.Circle((0, 0), r0, color="white", zorder=3)
     ax.add_patch(circ)
-    ax.set_title("Campo elétrico bobina → tanque [kV/mm]")
+    ax.set_title("Proximidade bobina → tanque")
     ax.set_xlabel("[mm]")
     ax.set_ylabel("[mm]")
-    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04, label="E [kV/mm]")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04,
+                 label="Distância da bobina [mm]")
     fig.tight_layout()
     return fig
 
